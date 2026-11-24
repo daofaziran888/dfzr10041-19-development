@@ -85,14 +85,23 @@ class ParseRule:
         return self._compiled_re
 
     def parse(self, line: str) -> tuple[ParseResultStatus, dict[str, str] | None]:
-        """用解析规则提取一条日志行的字段。"""
+        """用解析规则提取一条日志行的字段。
+
+        正则整体不匹配 → FORMAT_MISMATCH；正则命中但可选分组未参与捕获
+        （分组值为 None）→ FIELD_MISSING，并在返回值里带明确的缺字段清单。
+        注意：不能把“正则不匹配”的行伪装成某个字段为空。
+        """
         try:
             compiled = self.compile()
             m = compiled.match(line.strip())
             if m is None:
                 return ParseResultStatus.FORMAT_MISMATCH, None
-            fields = dict(zip(self.field_names, m.groups()))
-            missing = [name for name in self.field_names if name not in fields]
+            captured = list(m.groups())
+            fields = dict(zip(self.field_names, captured))
+            missing = [
+                name for name, value in zip(self.field_names, captured)
+                if value is None
+            ]
             if missing:
                 return ParseResultStatus.FIELD_MISSING, fields
             return ParseResultStatus.OK, fields
@@ -108,6 +117,7 @@ class LogEntry:
     source_id: str
     parsed_fields: dict[str, str] | None = None
     parse_status: ParseResultStatus = ParseResultStatus.OK
+    missing_fields: list[str] = field(default_factory=list)
     event_time: datetime | None = None
     host: str = ""
     checksum: str = field(default="")

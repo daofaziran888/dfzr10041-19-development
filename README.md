@@ -67,6 +67,7 @@ npm run dev
 | 采集指标 | `ingest_metric` | 指标记录 | 记录编号、日志来源、采集速率 |
 | 事件重放 | `replay_record` | 重放任务 | 任务编号、来源事件、重放范围 |
 | 质量报告 | `quality_report` | 质量评估 | 报告编号、日志来源、完整率 |
+| 质量补采 | `quality_remediation`（专用路由 `/api/quality`） | 解析失败明细/签审/派单 | 来源、物理行、失败原因、缺字段组、领用键 |
 | 标签分类 | `tag_taxonomy` | 标签定义 | 标签编号、标签名称、父级标签 |
 | 打包导出 | `export_bundle` | 导出包 | 包编号、事件类型、时间范围 |
 | 访问审计 | `audit_event` | 审计记录 | 记录编号、操作模块、操作人 |
@@ -80,6 +81,30 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 质量补采闭环（解析失败明细 → 签审 → 派单 → 恢复 → 交接）
+
+质量报告之外另有一套专用闭环，代码在 `backend/app/core/quality.py` 与
+`backend/app/routers/quality.py`（前缀 `/api/quality`），前端页面为
+`/quality_remediation`（`QualityRemediationView.vue`）。
+
+- **失败明细按来源 + 物理行展开**：逐行区分空行（`line_empty`）、格式不符
+  （`format_mismatch`）、字段缺失（`field_missing`），文本相同的两行靠物理行号
+  分别定位；空行不再被解析管道静默跳过。
+- **覆盖率逐字段核对**：分母是实际被正则解析的行（不含空行/格式不符）。
+  一行有 method 但缺 request_id 时，只拉低 request_id 的覆盖率，method 不受影响，
+  不能用“解析成功”替代字段齐全。
+- **签审只受理明确的缺字段组**：格式不符/空行送签审返回 400；签审冻结当时看到的
+  全部失败明细快照，签审状态按物理位置跨规则版本持续有效。
+- **派单行级互斥**：领用键为 `来源|文件|物理行`，同一位置全局只可出单一次，
+  并发冲突返回 409；同作业重复领用幂等返回原单。
+- **断点恢复**：`snapshot/restore` 与 `/reconcile` 以实际领用台账为准，
+  重开后不把同一行重派给另一作业，新试算不覆盖旧签审范围。
+- **规则更正只增版本**：`/retrial` 产生不可变新版本，旧明细、旧签审、已派补采单
+  范围保持不变；`/handoff` 交接记录说明每行何时可处理、如何补采以及旧明细保留位置。
+
+测试：`python tests/test_quality_remediation.py`（领域与并发，32 项）、
+`python tests/test_quality_api.py`（路由 HTTP 语义）。
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA

@@ -139,10 +139,18 @@ class IngestPipeline:
     # ---------- 数据流 1: log_source → parser_rule → ingest_job → event_store ----------
 
     def parse_raw_lines(self, source: LogSourceConfig, raw_lines: list[str]) -> list[LogEntry]:
-        """用来源配置校验原始日志行格式。"""
+        """用来源配置校验原始日志行格式。
+
+        空行不再静默跳过：产出 LINE_EMPTY 明细并保留物理行号，
+        这样质量报告才能区分“空行 / 格式不符 / 字段缺失”三类失败。
+        """
         entries: list[LogEntry] = []
         for i, line in enumerate(raw_lines):
             if not line.strip():
+                entries.append(LogEntry(
+                    raw_line=line, line_number=i + 1, source_id=source.source_id,
+                    parse_status=ParseResultStatus.LINE_EMPTY,
+                ))
                 continue
             if not source.match_format(line):
                 entries.append(LogEntry(
@@ -156,13 +164,21 @@ class IngestPipeline:
         return entries
 
     def apply_parse_rules(self, entries: list[LogEntry], rule: ParseRule) -> list[LogEntry]:
-        """用解析规则从日志条目中提取字段。"""
+        """用解析规则从日志条目中提取字段，并记录明确的缺失字段组。"""
         for entry in entries:
-            if entry.parse_status == ParseResultStatus.FORMAT_MISMATCH:
+            if entry.parse_status in (
+                ParseResultStatus.FORMAT_MISMATCH, ParseResultStatus.LINE_EMPTY,
+            ):
                 continue
             status, fields = rule.parse(entry.raw_line)
             entry.parse_status = status
             entry.parsed_fields = fields or {}
+            if status == ParseResultStatus.FIELD_MISSING:
+                expected = set(rule.field_names)
+                entry.missing_fields = sorted(
+                    expected - {name for name, value in entry.parsed_fields.items()
+                                if value is not None}
+                )
             entry.checksum = entry.compute_checksum()
         return entries
 
@@ -172,7 +188,9 @@ class IngestPipeline:
         for entry in entries:
             if job.processed_lines >= job.batch_size:
                 break
-            if entry.parse_status == ParseResultStatus.FORMAT_MISMATCH:
+            if entry.parse_status in (
+                ParseResultStatus.FORMAT_MISMATCH, ParseResultStatus.LINE_EMPTY,
+            ):
                 job.skipped_lines += 1
                 processed.append(entry)
                 continue
